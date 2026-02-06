@@ -3,16 +3,19 @@ from airflow.operators.python import PythonOperator
 from hooks.tfl_hook import TfLHook
 from datetime import datetime, timedelta
 import json
+import pandas as pd
 
 def extract_bus_data():
     hook = TfLHook()
-    # Gọi endpoint lấy tất cả xe bus
+
     data = hook.get_data("Line/159/Arrivals")   
     
-    # Lưu tạm vào thư mục include để kiểm tra
     file_path = f"/usr/local/airflow/include/bus_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(file_path, 'w') as f:
-        json.dump(data[:100], f) # Lấy 100 con xe đầu tiên làm mẫu
+    # with open(file_path, 'w') as f:
+    #     json.dump(data[:100], f) 
+    df = pd.DataFrame(data)
+    df_limited = df.head(100)
+    df_limited.to_json(file_path, orient='records', lines=True)
     print(f"Đã trích xuất dữ liệu thành công vào {file_path}")
 
 default_args = {
@@ -25,7 +28,7 @@ default_args = {
 with DAG(
     dag_id='london_bus_extraction_v1',
     default_args=default_args,
-    schedule='@hourly', # Chạy mỗi tiếng một lần
+    schedule='@hourly', 
     catchup=False
 ) as dag:
 
