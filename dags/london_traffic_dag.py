@@ -19,7 +19,8 @@ def extract_bus_data():
         a = 0
         for i in range(0, len(data), chunk_size):
             chunk = data[i : i + chunk_size]
-            df = pd.DataFrame(chunk)
+            # df = pd.DataFrame(chunk)
+            df = pd.json_normalize(chunk,meta=['lineId','lineName',"stationName",'direction','towards','timeToStation','vehicleId','stationName'])
             df.to_json(file_path, orient='records', lines=True, mode='a')
             a += 1
             logging.info(f"Đã trích xuất dữ liệu thành công vào {file_path} lần {a}")
@@ -29,11 +30,16 @@ def extract_bus_data():
         raise
     
 
+
 default_args = {
-    'owner': 'gemini_user',
-    'start_date': datetime(2024, 1, 1),
+    'owner': 'Tuan Quang',
+    'depends_on_past': False,
+    'start_date': datetime(2026, 1, 1),
+    'email': ['tbuiquang2002@gmail.com'],
+    'email_on_failure': True,
+    'email_on_retry': False,
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retry_delay': timedelta(minutes=10),
 }
 
 with DAG(
