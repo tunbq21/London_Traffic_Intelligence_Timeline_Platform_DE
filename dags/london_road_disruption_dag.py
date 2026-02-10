@@ -4,11 +4,12 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import TaskGroup
 from hooks.tfl_hook import TfLHook
 from datetime import datetime, timedelta
-import json
+import json, os
 import logging
 import pandas as pd
 import csv
 from pathlib import Path
+import psycopg2
 
 # Danh sách cột cố định
 COLUMNS = [
@@ -101,9 +102,74 @@ def load_csv_to_postgres(**kwargs):
         FROM STDIN WITH (FORMAT CSV, HEADER, DELIMITER ',', NULL '');
     """
     pg_hook.copy_expert(sql=copy_sql, filename=csv_file_path)
+
+
+
+
+def create_road_table_azure():
+    try:
+        # Lấy link từ biến môi trường
+        conn_uri = os.getenv('AIRFLOW_CONN_AZURE_POSTGRES_CONN')
+        conn = psycopg2.connect(conn_uri)
+        
+        cur = conn.cursor()
+        create_sql = """
+        DROP TABLE IF EXISTS london_road_disruptions;
+        CREATE TABLE london_road_disruptions (
+            id VARCHAR(100) PRIMARY KEY,
+            category VARCHAR(100),
+            severity VARCHAR(100),
+            location TEXT,
+            comments TEXT,
+            startDateTime TEXT,
+            endDateTime TEXT,
+            lastModDateTime TEXT,
+            point TEXT,
+            extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        cur.execute(create_sql)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logging.info("Kết nối và tạo bảng Azure thành công bằng psycopg2 + ENV!")
+    except Exception as e:
+        logging.error(f"Lỗi: {e}")
+        raise
+
+
+def load_csv_to_azure_postgres(**kwargs):
+    ti = kwargs['ti']
+    # Lấy đường dẫn file CSV từ task trước đó trong group
+    csv_file_path = ti.xcom_pull(task_ids='extraction_group.jsonl_to_csv')
     
-    # Bước phụ: Sau khi load xong, nếu muốn đổi TEXT về TIMESTAMP trong database
-    # pg_hook.run("ALTER TABLE london_road_disruptions ALTER COLUMN startDateTime TYPE TIMESTAMP USING startDateTime::timestamp;")
+    if not csv_file_path:
+        logging.warning("Không tìm thấy đường dẫn file CSV từ XCom.")
+        return
+
+    try:
+        conn_uri = os.getenv('AIRFLOW_CONN_AZURE_POSTGRES_CONN')
+        conn = psycopg2.connect(conn_uri)
+        
+        cur = conn.cursor()
+        
+        # Mở file CSV và sử dụng lệnh copy_expert (hoặc copy_from)
+        with open(csv_file_path, 'r', encoding='utf-8') as f:
+            copy_sql = """
+                COPY london_road_disruptions(id, category, severity, location, comments, startDateTime, endDateTime, lastModDateTime, point)
+                FROM STDIN WITH (FORMAT CSV, HEADER, DELIMITER ',', NULL '');
+            """
+            cur.copy_expert(sql=copy_sql, file=f)
+            
+        conn.commit()
+        cur.close()
+        conn.close()
+        logging.info(f"Đã load dữ liệu thành công từ {csv_file_path} lên Azure Postgres.")
+    except Exception as e:
+        logging.error(f"Lỗi khi load dữ liệu lên Azure: {e}")
+        raise
+
+
 
 default_args = {
     'owner': 'Tuan Quang',
@@ -140,4 +206,18 @@ with DAG(
         python_callable=load_csv_to_postgres,
     )
 
-    create_table_task >> extraction_group >> load_data_task
+    create_table_filess_task = PythonOperator(
+        task_id='create_road_table_filess',
+        python_callable=create_road_table_azure,
+    )
+
+    # Task load data lên Filess
+    load_data_filess_task = PythonOperator(
+        task_id='load_csv_to_filess_postgres',
+        python_callable=load_csv_to_azure_postgres,
+    )
+
+
+    [create_table_task, create_table_filess_task] >> extraction_group 
+
+    extraction_group >> [load_data_task, load_data_filess_task]
