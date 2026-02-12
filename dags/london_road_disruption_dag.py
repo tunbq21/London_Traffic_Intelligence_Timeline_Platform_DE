@@ -112,20 +112,19 @@ def create_road_table_azure():
         
         cur = conn.cursor()
         create_sql = """
-        DROP TABLE IF EXISTS london_road_disruptions;
-        CREATE TABLE london_road_disruptions (
-            id VARCHAR(100) PRIMARY KEY,
-            category VARCHAR(100),
-            severity VARCHAR(100),
-            location TEXT,
-            comments TEXT,
-            startDateTime TEXT,
-            endDateTime TEXT,
-            lastModDateTime TEXT,
-            point TEXT,
-            extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
+    CREATE TABLE IF NOT EXISTS london_road_disruptions (
+        id VARCHAR(100) PRIMARY KEY,
+        category VARCHAR(100),
+        severity VARCHAR(100),
+        location TEXT,
+        comments TEXT,
+        startDateTime TEXT,
+        endDateTime TEXT,
+        lastModDateTime TEXT,
+        point TEXT,
+        extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
         cur.execute(create_sql)
         conn.commit()
         cur.close()
@@ -141,31 +140,59 @@ def load_csv_to_azure_postgres(**kwargs):
     csv_file_path = ti.xcom_pull(task_ids='extraction_group.jsonl_to_csv')
     
     if not csv_file_path:
-        logging.warning("Không tìm thấy đường dẫn file CSV từ XCom.")
+        logging.warning("Không tìm thấy đường dẫn file CSV.")
         return
 
+    pg_hook = PostgresHook(postgres_conn_id='azure_postgres_conn')
+    
+    # Lấy connection object thực sự để giữ Session không bị đóng
+    conn = pg_hook.get_conn()
+    cur = conn.cursor()
+    
     try:
-        conn_uri = os.getenv('AIRFLOW_CONN_AZURE_POSTGRES_CONN')
-        conn = psycopg2.connect(conn_uri)
+        # 1. Tạo bảng tạm (Trên cùng 1 cursor/session)
+        cur.execute("CREATE TEMP TABLE temp_london_road (LIKE london_road_disruptions INCLUDING ALL);")
         
-        cur = conn.cursor()
-        
+        # 2. Sử dụng copy_expert với cursor hiện tại
+        copy_query = """
+            COPY temp_london_road(id, category, severity, location, comments, 
+                                 startDateTime, endDateTime, lastModDateTime, point) 
+            FROM STDIN WITH (FORMAT CSV, HEADER, DELIMITER ',', NULL '');
+        """
         with open(csv_file_path, 'r', encoding='utf-8') as f:
-            copy_sql = """
-                COPY london_road_disruptions(id, category, severity, location, comments, startDateTime, endDateTime, lastModDateTime, point)
-                FROM STDIN WITH (FORMAT CSV, HEADER, DELIMITER ',', NULL '');
-            """
-            cur.copy_expert(sql=copy_sql, file=f)
+            cur.copy_expert(sql=copy_query, file=f)
             
+        # 3. Thực hiện Upsert từ bảng tạm vào bảng chính
+        upsert_sql = """
+            INSERT INTO london_road_disruptions (id, category, severity, location, comments, 
+                                                startDateTime, endDateTime, lastModDateTime, point)
+            SELECT id, category, severity, location, comments, 
+                   startDateTime, endDateTime, lastModDateTime, point 
+            FROM temp_london_road
+            ON CONFLICT (id) DO UPDATE SET 
+                category = EXCLUDED.category,
+                severity = EXCLUDED.severity,
+                location = EXCLUDED.location,
+                comments = EXCLUDED.comments,
+                startDateTime = EXCLUDED.startDateTime,
+                endDateTime = EXCLUDED.endDateTime,
+                lastModDateTime = EXCLUDED.lastModDateTime,
+                point = EXCLUDED.point,
+                extracted_at = CURRENT_TIMESTAMP;
+        """
+        cur.execute(upsert_sql)
+        
+        # Quan trọng: Commit để lưu thay đổi và đóng bảng tạm
         conn.commit()
+        logging.info("Upsert thành công lên Azure Postgres!")
+        
+    except Exception as e:
+        conn.rollback() # Hoàn tác nếu lỗi
+        logging.error(f"Lỗi khi xử lý database: {e}")
+        raise
+    finally:
         cur.close()
         conn.close()
-        logging.info(f"Đã load dữ liệu thành công từ {csv_file_path} lên Azure Postgres.")
-    except Exception as e:
-        logging.error(f"Lỗi khi load dữ liệu lên Azure: {e}")
-        raise
-
-
 
 default_args = {
     'owner': 'Tuan Quang',
